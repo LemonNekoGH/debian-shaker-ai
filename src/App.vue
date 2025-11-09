@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import { FieldCheckbox } from '@proj-airi/ui'
 import FieldRange from '@proj-airi/ui/src/components/Form/Field/FieldRange.vue'
 import { useCssVar, useElementBounding, useEventListener, useLocalStorage } from '@vueuse/core'
-import { Bodies, Body, Composite, Engine, Render } from 'matter-js'
 
+import { Bodies, Body, Composite, Engine, Render } from 'matter-js'
 import { onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
 import { useTicker } from './composables/useTicker'
 
@@ -40,6 +41,15 @@ const LARGE_BOX_DIMENSIONS = {
   right: { width: 4, height: 360 },
   bottom: { width: 360, height: 4 },
 } as const
+const LARGE_BOX_HALF_SIZE = {
+  x: LARGE_BOX_DIMENSIONS.bottom.width / 2,
+  y: LARGE_BOX_DIMENSIONS.left.height / 2,
+} as const
+const SMALL_BOX_HALF_SIZE = {
+  x: 90,
+  y: 90,
+} as const
+const LARGE_BOX_INSIDE_TOLERANCE = 12
 
 interface Vector2 {
   x: number
@@ -51,6 +61,43 @@ function rotateVector(offset: Vector2, cos: number, sin: number): Vector2 {
     x: offset.x * cos - offset.y * sin,
     y: offset.x * sin + offset.y * cos,
   }
+}
+
+function getOrientedCorners(center: Vector2, halfSize: Vector2, angle: number): Vector2[] {
+  const cos = Math.cos(angle)
+  const sin = Math.sin(angle)
+  const localCorners: Vector2[] = [
+    { x: -halfSize.x, y: -halfSize.y },
+    { x: halfSize.x, y: -halfSize.y },
+    { x: halfSize.x, y: halfSize.y },
+    { x: -halfSize.x, y: halfSize.y },
+  ]
+
+  return localCorners.map((corner) => {
+    const rotated = rotateVector(corner, cos, sin)
+    return {
+      x: center.x + rotated.x,
+      y: center.y + rotated.y,
+    }
+  })
+}
+
+function isPointInsideOrientedRect(
+  point: Vector2,
+  center: Vector2,
+  halfSize: Vector2,
+  angle: number,
+  tolerance = 0,
+): boolean {
+  const cos = Math.cos(angle)
+  const sin = Math.sin(angle)
+  const dx = point.x - center.x
+  const dy = point.y - center.y
+
+  const localX = dx * cos + dy * sin
+  const localY = -dx * sin + dy * cos
+
+  return Math.abs(localX) <= halfSize.x + tolerance && Math.abs(localY) <= halfSize.y + tolerance
 }
 
 const largeBoxCenter = ref({ ...LARGE_BOX_CENTER_INITIAL })
@@ -76,6 +123,8 @@ const smallBoxTransform = ref({
   y: 360 - 90,
   angle: 0,
 })
+const isSmallBoxInsideLargeBox = ref(false)
+const isLargeBoxInsideViewport = ref(false)
 
 const learningRate = useLocalStorage('learning-rate', 0.01)
 
@@ -169,6 +218,26 @@ const { start, stop } = useTicker((deltaTime) => {
     angle: smallBox.angle,
   }
 
+  const smallBoxCorners = getOrientedCorners(
+    { x: smallBox.position.x, y: smallBox.position.y },
+    SMALL_BOX_HALF_SIZE,
+    smallBox.angle,
+  )
+  isSmallBoxInsideLargeBox.value = smallBoxCorners.every(corner =>
+    isPointInsideOrientedRect(
+      corner,
+      largeBoxCenter.value,
+      LARGE_BOX_HALF_SIZE,
+      largeBoxAngle.value,
+      LARGE_BOX_INSIDE_TOLERANCE,
+    ),
+  )
+
+  const largeBoxCorners = getOrientedCorners(largeBoxCenter.value, LARGE_BOX_HALF_SIZE, largeBoxAngle.value)
+  isLargeBoxInsideViewport.value = largeBoxCorners.every(corner =>
+    corner.x >= 0 && corner.x <= 720 && corner.y >= 0 && corner.y <= 720,
+  )
+
   Engine.update(engine, deltaTime)
 })
 
@@ -222,6 +291,20 @@ onUnmounted(() => {
             class="text-black w-full"
           />
         </div>
+        <div class="card space-y-2 text-black">
+          <FieldCheckbox
+            v-model="isSmallBoxInsideLargeBox"
+            label="Is Small Box Inside Large Box"
+            description="Whether the small box is inside the large box"
+            class="text-black w-full pointer-events-none"
+          />
+          <FieldCheckbox
+            v-model="isLargeBoxInsideViewport"
+            label="Is Large Box Inside Viewport"
+            description="Whether the large box is inside the viewport"
+            class="text-black w-full pointer-events-none"
+          />
+        </div>
       </div>
     </div>
   </div>
@@ -254,7 +337,7 @@ onUnmounted(() => {
 
   .game-content {
     --at-apply: aspect-1/1 max-w-full max-h-full relative;
-    --at-apply: outline-green-300 outline-solid outline-4 rounded-md;
+    --at-apply: outline-gray-200 outline-solid outline-4 rounded-md;
     --at-apply: overflow-hidden;
   }
 
