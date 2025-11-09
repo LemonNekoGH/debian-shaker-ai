@@ -16,11 +16,6 @@ watch(gameContentWidth, (width) => {
   viewportWidth.value = width.toString()
 })
 
-const largeBoxAcceleration = ref({
-  x: 0,
-  y: 0,
-  angle: 0,
-})
 const largeBoxVelocity = ref({
   x: 0,
   y: 0,
@@ -145,31 +140,29 @@ Composite.add(engine.world, ground)
 
 useEventListener(window, 'keydown', (event) => {
   if (event.code === 'KeyS') {
-    largeBoxAcceleration.value.y += 0.01
+    largeBoxVelocity.value.y += 1
   }
   if (event.code === 'KeyW') {
-    largeBoxAcceleration.value.y -= 0.01
+    largeBoxVelocity.value.y -= 1
   }
   if (event.code === 'KeyA') {
-    largeBoxAcceleration.value.x -= 0.01
+    largeBoxVelocity.value.x -= 1
   }
   if (event.code === 'KeyD') {
-    largeBoxAcceleration.value.x += 0.01
+    largeBoxVelocity.value.x += 1
   }
   if (event.code === 'KeyQ') {
-    largeBoxAcceleration.value.angle -= 1 * Math.PI / 180
+    largeBoxVelocity.value.angle -= 1
   }
   if (event.code === 'KeyE') {
-    largeBoxAcceleration.value.angle += 1 * Math.PI / 180
+    largeBoxVelocity.value.angle += 1
   }
 })
 
 const { start, stop } = useTicker((deltaTime) => {
-  largeBoxVelocity.value.x += largeBoxAcceleration.value.x
-  largeBoxVelocity.value.y += largeBoxAcceleration.value.y
-  largeBoxCenter.value.x += largeBoxVelocity.value.x
-  largeBoxCenter.value.y += largeBoxVelocity.value.y
-  largeBoxAngle.value += largeBoxAcceleration.value.angle
+  largeBoxCenter.value.x += largeBoxVelocity.value.x * deltaTime / 1000
+  largeBoxCenter.value.y += largeBoxVelocity.value.y * deltaTime / 1000
+  largeBoxAngle.value += largeBoxVelocity.value.angle * deltaTime / 1000 * Math.PI / 180
 
   const cos = Math.cos(largeBoxAngle.value)
   const sin = Math.sin(largeBoxAngle.value)
@@ -277,7 +270,7 @@ onUnmounted(() => {
     </div>
     <div class="game-settings-container">
       <div class="game-settings">
-        <div class="card h-98">
+        <div class="card hidden h-98">
           <div id="matterjs-renderer" class="w-180 h-180 rounded-md overflow-hidden scale-50 origin-top-left" />
         </div>
         <div class="card">
@@ -291,19 +284,55 @@ onUnmounted(() => {
             class="text-black w-full"
           />
         </div>
-        <div class="card space-y-2 text-black">
-          <FieldCheckbox
-            v-model="isSmallBoxInsideLargeBox"
-            label="Is Small Box Inside Large Box"
-            description="Whether the small box is inside the large box"
-            class="text-black w-full pointer-events-none"
-          />
-          <FieldCheckbox
-            v-model="isLargeBoxInsideViewport"
-            label="Is Large Box Inside Viewport"
-            description="Whether the large box is inside the viewport"
-            class="text-black w-full pointer-events-none"
-          />
+        <div class="flex gap-4">
+          <div class="card flex-1 pointer-events-none">
+            <FieldRange
+              v-model="largeBoxVelocity.x"
+              :min="-5"
+              :max="5"
+              :step="0.01"
+              label="Large Box X Velocity"
+              class="text-black w-full"
+            />
+          </div>
+          <div class="card flex-1 pointer-events-none">
+            <FieldRange
+              v-model="largeBoxVelocity.y"
+              :min="-5"
+              :max="5"
+              :step="0.01"
+              label="Large Box Y Velocity"
+              class="text-black w-full"
+            />
+          </div>
+          <div class="card flex-1 pointer-events-none">
+            <FieldRange
+              v-model="largeBoxVelocity.angle"
+              :min="-180"
+              :max="180"
+              :step="0.01"
+              label="Large Box Angle Velocity"
+              class="text-black w-full"
+            />
+          </div>
+        </div>
+        <div class="flex gap-4">
+          <div class="card flex-1 space-y-2 text-black">
+            <FieldCheckbox
+              v-model="isSmallBoxInsideLargeBox"
+              label="Is Small Box Inside Large Box"
+              description="Whether the small box is inside the large box"
+              class="text-black w-full pointer-events-none"
+            />
+          </div>
+          <div class="card flex-1 space-y-2 text-black">
+            <FieldCheckbox
+              v-model="isLargeBoxInsideViewport"
+              label="Is Large Box Inside Viewport"
+              description="Whether the large box is inside the viewport"
+              class="text-black w-full pointer-events-none"
+            />
+          </div>
         </div>
       </div>
     </div>
