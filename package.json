@@ -1,0 +1,49 @@
+{
+  "name": "breakout-fight",
+  "type": "module",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "bun --bun vite",
+    "typecheck": "bun --bun vue-tsc --noEmit",
+    "build": "bun --bun vite build",
+    "preview": "bun --bun vite preview",
+    "lint": "bun --bun oxlint --config ./oxlintrc.jsonc && bun --bun eslint --cache .",
+    "lint:fix": "bun --bun oxlint --config ./oxlintrc.jsonc --fix && bun --bun eslint --cache --fix .",
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:run": "vitest run"
+  },
+  "dependencies": {
+    "@proj-airi/ui": "^0.7.2-beta.2",
+    "@vueuse/core": "^13.9.0",
+    "animejs": "^4.2.2",
+    "matter-js": "^0.20.0",
+    "nanoid": "^5.1.6",
+    "reka-ui": "^2.6.0",
+    "rl-ts": "^0.0.11",
+    "vue": "^3.5.22"
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "^6.1.0",
+    "@iconify-json/solar": "^1.2.5",
+    "@lemonneko/postcss-plugin-pxp": "^0.0.19",
+    "@lemonneko/vue-compiler-plugin-pxp": "^0.0.19",
+    "@lemonneko/vue-plugin-pxp": "^0.0.19",
+    "@proj-airi/unocss-preset-chromatic": "^1.0.2",
+    "@types/matter-js": "^0.20.2",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "@vitest/ui": "^4.0.6",
+    "eslint": "^9.38.0",
+    "eslint-plugin-oxlint": "~1.22.0",
+    "jsdom": "^27.1.0",
+    "oxlint": "~1.22.0",
+    "postcss-value-parser": "^4.2.0",
+    "typescript": "^5.9.3",
+    "unocss": "^66.5.4",
+    "vite": "npm:rolldown-vite@latest",
+    "vite-plugin-vue-devtools": "^8.0.2",
+    "vitest": "^4.0.6",
+    "vue-tsc": "^3.1.2"
+  }
+}
