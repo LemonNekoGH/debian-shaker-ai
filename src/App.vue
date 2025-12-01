@@ -4,7 +4,7 @@ import FieldRange from '@proj-airi/ui/src/components/Form/Field/FieldRange.vue'
 import { useCssVar, useElementBounding, useEventListener, useLocalStorage } from '@vueuse/core'
 
 import { Bodies, Body, Composite, Engine, Render } from 'matter-js'
-import { onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
 import { useTicker } from './composables/useTicker'
 
 const gameContentRef = useTemplateRef<HTMLDivElement>('gameContentRef')
@@ -15,6 +15,8 @@ const viewportWidth = useCssVar('--viewport-width')
 watch(gameContentWidth, (width) => {
   viewportWidth.value = width.toString()
 })
+
+const showMatterJsRenderer = ref(false)
 
 const largeBoxVelocity = ref({
   x: 0,
@@ -122,8 +124,32 @@ const isSmallBoxInsideLargeBox = ref(false)
 const isLargeBoxInsideViewport = ref(false)
 
 const learningRate = useLocalStorage('learning-rate', 0.01)
+const discountFactor = useLocalStorage('discount-factor', 0.99)
+const epsilon = useLocalStorage('epsilon', 0.1)
+const simulationSpeed = useLocalStorage('simulation-speed', 1) // Physics simulation speed multiplier, 1 = normal speed
+
+// Training state
+const isTraining = ref(false)
+const currentEpisode = ref(0)
+const currentStep = ref(0)
+const totalReward = ref(0)
+const episodeRewards = ref<number[]>([])
+const averageReward = computed(() => {
+  if (episodeRewards.value.length === 0)
+    return 0
+  const last100 = episodeRewards.value.slice(-100)
+  return last100.reduce((a, b) => a + b, 0) / last100.length
+})
+
+// Q-Table (simple implementation with state discretization)
+const qTable = ref<Map<string, number[]>>(new Map())
+
+// Small box speed (for display)
+const smallBoxSpeed = ref(0)
 
 const engine = Engine.create()
+// Set physics simulation time scale
+engine.timing.timeScale = simulationSpeed.value
 
 const largeBox = {
   left: Bodies.rectangle(180, 360, 4, 360, { isStatic: true }),
@@ -135,7 +161,9 @@ Composite.add(engine.world, [largeBox.left, largeBox.right, largeBox.bottom])
 const smallBox = Bodies.rectangle(360, 360, 180, 180)
 Composite.add(engine.world, smallBox)
 
-const ground = Bodies.rectangle(360, 720, 720, 4, { isStatic: true })
+// Expand ground to prevent small box from falling infinitely
+// Lower position, wider width
+const ground = Bodies.rectangle(360, 900, 1440, 100, { isStatic: true })
 Composite.add(engine.world, ground)
 
 useEventListener(window, 'keydown', (event) => {
@@ -156,6 +184,293 @@ useEventListener(window, 'keydown', (event) => {
   }
   if (event.code === 'KeyE') {
     largeBoxVelocity.value.angle += 1
+  }
+})
+
+// State space definition
+const stateSpace = {
+  low: [0, 0, 0],
+  high: [720, 720, 1],
+  shape: [3],
+}
+
+// Discretize state (for Q-learning)
+function discretizeState(state: number[]): string {
+  const bins = [20, 20, 2] // Number of discretization bins for each dimension
+  const discretized = state.map((value, i) => {
+    const min = stateSpace.low[i]
+    const max = stateSpace.high[i]
+    const binSize = (max - min) / bins[i]
+    return Math.min(bins[i] - 1, Math.floor((value - min) / binSize))
+  })
+  return discretized.join(',')
+}
+
+// Get current state
+function getCurrentState(): number[] {
+  return [
+    largeBoxCenter.value.x,
+    largeBoxCenter.value.y,
+    isSmallBoxInsideLargeBox.value ? 1 : 0,
+  ]
+}
+
+// Calculate reward
+function calculateReward(): number {
+  let reward = 0
+
+  // Calculate small box speed
+  const smallBoxSpeed = Math.sqrt(
+    smallBox.velocity.x ** 2
+    + smallBox.velocity.y ** 2,
+  )
+
+  // Check if small box falls too far out of viewport
+  const smallBoxY = smallBox.position.y
+  if (smallBoxY > 800) {
+    // Small box falls too low, apply heavy penalty
+    reward -= 10
+  }
+
+  // Primary goal: small box inside large box
+  if (isSmallBoxInsideLargeBox.value) {
+    reward += 10
+  }
+  else {
+    reward -= 1
+  }
+
+  // Secondary goal: large box inside viewport
+  if (isLargeBoxInsideViewport.value) {
+    reward += 1
+  }
+  else {
+    reward -= 5
+  }
+
+  // Constraint: small box speed cannot be too small (minimum speed threshold: 0.5)
+  const MIN_SMALL_BOX_SPEED = 0.5
+  if (smallBoxSpeed < MIN_SMALL_BOX_SPEED) {
+    reward -= 2
+  }
+  else {
+    // Give small reward when small box speed is appropriate
+    reward += 0.5
+  }
+
+  // Penalize excessive speed (prevent infinite acceleration)
+  const MAX_SMALL_BOX_SPEED = 10
+  if (smallBoxSpeed > MAX_SMALL_BOX_SPEED) {
+    reward -= 5
+  }
+
+  // Penalize large box excessive speed
+  const largeBoxSpeed = Math.sqrt(
+    largeBoxVelocity.value.x ** 2
+    + largeBoxVelocity.value.y ** 2,
+  )
+  if (largeBoxSpeed > 3) {
+    reward -= 0.5
+  }
+
+  return reward
+}
+
+// Reset environment
+function resetEnvironment() {
+  // Reset large box position and angle
+  largeBoxCenter.value = { ...LARGE_BOX_CENTER_INITIAL }
+  largeBoxAngle.value = 0
+  largeBoxVelocity.value = { x: 0, y: 0, angle: 0 }
+
+  // Reset small box position (randomized to improve generalization)
+  const randomX = 200 + Math.random() * 320
+  const randomY = 200 + Math.random() * 320
+  Body.setPosition(smallBox, { x: randomX, y: randomY })
+  Body.setAngle(smallBox, Math.random() * Math.PI * 2)
+
+  // Give small box random initial velocity (ensure speed is not too small)
+  const angle = Math.random() * Math.PI * 2
+  const speed = 1 + Math.random() * 2 // Speed between 1-3
+  Body.setVelocity(smallBox, {
+    x: Math.cos(angle) * speed,
+    y: Math.sin(angle) * speed,
+  })
+  Body.setAngularVelocity(smallBox, (Math.random() - 0.5) * 0.2)
+
+  currentStep.value = 0
+  totalReward.value = 0
+}
+
+// Select action (ε-greedy strategy)
+function selectAction(state: string): number[] {
+  if (Math.random() < epsilon.value) {
+    // Exploration: random action
+    return [
+      Math.random() * 10 - 5,
+      Math.random() * 10 - 5,
+      Math.random() * 360 - 180,
+    ]
+  }
+  else {
+    // Exploitation: select action with highest Q-value
+    const qValues = qTable.value.get(state) || Array.from({ length: 27 }, () => 0)
+    const maxQ = Math.max(...qValues)
+    const maxIndices = qValues
+      .map((q, i) => (q === maxQ ? i : -1))
+      .filter(i => i !== -1)
+    const actionIndex = maxIndices[Math.floor(Math.random() * maxIndices.length)]
+
+    // Convert action index to continuous action
+    const xIndex = Math.floor(actionIndex / 9) % 3
+    const yIndex = Math.floor(actionIndex / 3) % 3
+    const angleIndex = actionIndex % 3
+
+    return [
+      (xIndex - 1) * 2.5,
+      (yIndex - 1) * 2.5,
+      (angleIndex - 1) * 90,
+    ]
+  }
+}
+
+// Get discrete action index
+function getActionIndex(action: number[]): number {
+  const xIndex = Math.round((action[0] + 5) / 10 * 2)
+  const yIndex = Math.round((action[1] + 5) / 10 * 2)
+  const angleIndex = Math.round((action[2] + 180) / 360 * 2)
+  return xIndex * 9 + yIndex * 3 + angleIndex
+}
+
+// Update Q-value
+function updateQValue(
+  state: string,
+  action: number[],
+  reward: number,
+  nextState: string,
+) {
+  const actionIndex = getActionIndex(action)
+
+  if (!qTable.value.has(state)) {
+    qTable.value.set(state, Array.from({ length: 27 }, () => 0))
+  }
+  if (!qTable.value.has(nextState)) {
+    qTable.value.set(nextState, Array.from({ length: 27 }, () => 0))
+  }
+
+  const qValues = qTable.value.get(state)!
+  const nextQValues = qTable.value.get(nextState)!
+  const maxNextQ = Math.max(...nextQValues)
+
+  // Q-learning update formula
+  qValues[actionIndex] = qValues[actionIndex]
+    + learningRate.value * (reward + discountFactor.value * maxNextQ - qValues[actionIndex])
+}
+
+// Train one step
+let trainingIntervalId: number | null = null
+const MAX_STEPS_PER_EPISODE = 1000
+
+function trainStep() {
+  if (!isTraining.value)
+    return
+
+  const state = getCurrentState()
+  const stateKey = discretizeState(state)
+  const action = selectAction(stateKey)
+
+  // Apply action
+  largeBoxVelocity.value = {
+    x: action[0],
+    y: action[1],
+    angle: action[2],
+  }
+
+  // Wait for physics engine update, then get next state and reward
+  setTimeout(() => {
+    const reward = calculateReward()
+    const nextState = getCurrentState()
+    const nextStateKey = discretizeState(nextState)
+
+    // Update Q-table
+    updateQValue(stateKey, action, reward, nextStateKey)
+
+    totalReward.value += reward
+    currentStep.value++
+
+    // Check if small box is outside viewport
+    const isSmallBoxOutsideViewport = smallBox.position.x < 0
+      || smallBox.position.x > 720
+      || smallBox.position.y < 0
+      || smallBox.position.y > 720
+
+    // Check if current episode should end
+    const isDone
+      = !isLargeBoxInsideViewport.value
+        || currentStep.value >= MAX_STEPS_PER_EPISODE
+        || (isSmallBoxInsideLargeBox.value && currentStep.value > 100) // Successfully maintained for a period
+        || smallBox.position.y > 800 // Small box falls too low
+        || isSmallBoxOutsideViewport // Small box flies out of viewport
+
+    if (isDone) {
+      episodeRewards.value.push(totalReward.value)
+      currentEpisode.value++
+      resetEnvironment()
+    }
+  }, 16) // Approximately 60fps
+}
+
+// Start training
+function startToTrain() {
+  if (isTraining.value)
+    return
+
+  isTraining.value = true
+  resetEnvironment()
+
+  // Adjust training interval based on simulation speed
+  // Faster simulation speed means shorter training interval to keep up with physics simulation rhythm
+  const baseInterval = 50 // Base training interval (ms)
+  const actualInterval = baseInterval / simulationSpeed.value
+
+  trainingIntervalId = window.setInterval(() => {
+    trainStep()
+  }, actualInterval)
+}
+
+// Stop training
+function stopTraining() {
+  isTraining.value = false
+  if (trainingIntervalId !== null) {
+    clearInterval(trainingIntervalId)
+    trainingIntervalId = null
+  }
+  largeBoxVelocity.value = { x: 0, y: 0, angle: 0 }
+}
+
+// Reset training
+function resetTraining() {
+  stopTraining()
+  currentEpisode.value = 0
+  currentStep.value = 0
+  totalReward.value = 0
+  episodeRewards.value = []
+  qTable.value.clear()
+  resetEnvironment()
+}
+
+// Watch simulation speed changes, update physics engine time scale and training interval in real-time
+watch(simulationSpeed, (newSpeed) => {
+  engine.timing.timeScale = newSpeed
+
+  // If training is in progress, need to update training interval
+  if (isTraining.value && trainingIntervalId !== null) {
+    clearInterval(trainingIntervalId)
+    const baseInterval = 50
+    const actualInterval = baseInterval / newSpeed
+    trainingIntervalId = window.setInterval(() => {
+      trainStep()
+    }, actualInterval)
   }
 })
 
@@ -231,6 +546,12 @@ const { start, stop } = useTicker((deltaTime) => {
     corner.x >= 0 && corner.x <= 720 && corner.y >= 0 && corner.y <= 720,
   )
 
+  // Update small box speed display
+  smallBoxSpeed.value = Math.sqrt(
+    smallBox.velocity.x ** 2
+    + smallBox.velocity.y ** 2,
+  )
+
   Engine.update(engine, deltaTime)
 })
 
@@ -252,6 +573,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stop()
+  stopTraining()
 })
 </script>
 
@@ -270,8 +592,60 @@ onUnmounted(() => {
     </div>
     <div class="game-settings-container">
       <div class="game-settings">
-        <div class="card hidden h-98">
+        <div class="card">
+          <FieldCheckbox
+            v-model="showMatterJsRenderer"
+            label="Show Matter.js Renderer"
+            description="Whether to show the Matter.js renderer"
+            class="text-black w-full"
+          />
+        </div>
+        <div class="card h-98" :class="{ hidden: !showMatterJsRenderer }">
           <div id="matterjs-renderer" class="w-180 h-180 rounded-md overflow-hidden scale-50 origin-top-left" />
+        </div>
+        <div class="card">
+          <div class="text-black space-y-4">
+            <h3 class="text-lg font-bold">
+              Training Control
+            </h3>
+            <div class="flex gap-2">
+              <button
+                :disabled="isTraining"
+                class="btn btn-primary flex-1"
+                @click="startToTrain"
+              >
+                Start Training
+              </button>
+              <button
+                :disabled="!isTraining"
+                class="btn btn-secondary flex-1"
+                @click="stopTraining"
+              >
+                Stop Training
+              </button>
+              <button
+                class="btn btn-danger flex-1"
+                @click="resetTraining"
+              >
+                Reset Training
+              </button>
+            </div>
+            <div class="text-sm space-y-1">
+              <div>Status: <span class="font-bold">{{ isTraining ? 'Training' : 'Stopped' }}</span></div>
+              <div>Episode: <span class="font-bold">{{ currentEpisode }}</span></div>
+              <div>Current Step: <span class="font-bold">{{ currentStep }}</span></div>
+              <div>Current Reward: <span class="font-bold">{{ totalReward.toFixed(2) }}</span></div>
+              <div>Average Reward (Last 100 Episodes): <span class="font-bold">{{ averageReward.toFixed(2) }}</span></div>
+              <div>Q-Table Size: <span class="font-bold">{{ qTable.size }}</span></div>
+              <div>
+                Small Box Speed:
+                <span class="font-bold" :class="{ 'text-red-600': smallBoxSpeed < 0.5, 'text-green-600': smallBoxSpeed >= 0.5 }">
+                  {{ smallBoxSpeed.toFixed(2) }}
+                </span>
+                <span class="text-xs text-gray-500">(Min: 0.5)</span>
+              </div>
+            </div>
+          </div>
         </div>
         <div class="card">
           <FieldRange
@@ -281,6 +655,39 @@ onUnmounted(() => {
             :step="0.01"
             label="Learning Rate"
             description="The learning rate of the agent"
+            class="text-black w-full"
+          />
+        </div>
+        <div class="card">
+          <FieldRange
+            v-model="discountFactor"
+            :min="0"
+            :max="1"
+            :step="0.01"
+            label="Discount Factor"
+            description="Discount factor for future rewards"
+            class="text-black w-full"
+          />
+        </div>
+        <div class="card">
+          <FieldRange
+            v-model="epsilon"
+            :min="0"
+            :max="1"
+            :step="0.01"
+            label="Epsilon"
+            description="Exploration probability for ε-greedy strategy"
+            class="text-black w-full"
+          />
+        </div>
+        <div class="card">
+          <FieldRange
+            v-model="simulationSpeed"
+            :min="0.1"
+            :max="10"
+            :step="0.1"
+            label="Simulation Speed"
+            description="Physics simulation speed multiplier, higher values mean faster simulation (takes effect in real-time)"
             class="text-black w-full"
           />
         </div>
@@ -428,6 +835,29 @@ onUnmounted(() => {
 
 .card {
   --at-apply: outline-2 outline-gray-100 bg-gray-50 outline-solid rounded-md p-4;
+}
+
+.btn {
+  --at-apply: px-4 py-2 rounded-md font-medium transition-colors;
+  --at-apply: disabled:opacity-50 disabled:cursor-not-allowed;
+}
+
+.btn-primary {
+  --at-apply: bg-blue-500 text-white;
+  --at-apply: hover:bg-blue-600;
+  --at-apply: disabled:hover:bg-blue-500;
+}
+
+.btn-secondary {
+  --at-apply: bg-gray-500 text-white;
+  --at-apply: hover:bg-gray-600;
+  --at-apply: disabled:hover:bg-gray-500;
+}
+
+.btn-danger {
+  --at-apply: bg-red-500 text-white;
+  --at-apply: hover:bg-red-600;
+  --at-apply: disabled:hover:bg-red-500;
 }
 
 .game-settings-container {

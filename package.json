@@ -42,6 +42,7 @@
     "typescript": "^5.9.3",
     "unocss": "^66.5.4",
     "vite": "npm:rolldown-vite@latest",
+    "vite-plugin-node-polyfills": "^0.24.0",
     "vite-plugin-vue-devtools": "^8.0.2",
     "vitest": "^4.0.6",
     "vue-tsc": "^3.1.2"
