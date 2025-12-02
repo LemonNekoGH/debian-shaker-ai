@@ -24,6 +24,24 @@ const largeBoxVelocity = ref({
   angle: 0,
 })
 
+const largeBoxAcceleration = ref({
+  x: 0,
+  y: 0,
+  angle: 0,
+})
+
+const MAX_VELOCITY = {
+  x: 15,
+  y: 15,
+  angle: 360,
+} as const
+
+const MAX_ACCELERATION = {
+  x: 3,
+  y: 3,
+  angle: 180,
+} as const
+
 const LARGE_BOX_CENTER_INITIAL = {
   x: 360,
   y: 360,
@@ -122,6 +140,10 @@ const smallBoxTransform = ref({
 })
 const isSmallBoxInsideLargeBox = ref(false)
 const isLargeBoxInsideViewport = ref(false)
+const modelFileInputRef = useTemplateRef<HTMLInputElement>('modelFileInputRef')
+const modelStatusMessage = ref('')
+const modelStatusLevel = ref<'success' | 'error' | ''>('')
+let modelStatusTimeout: number | null = null
 
 const learningRate = useLocalStorage('learning-rate', 0.01)
 const discountFactor = useLocalStorage('discount-factor', 0.99)
@@ -143,6 +165,18 @@ const averageReward = computed(() => {
 
 // Q-Table (simple implementation with state discretization)
 const qTable = ref<Map<string, number[]>>(new Map())
+const MODEL_FILE_VERSION = 1
+
+interface SavedModelFile {
+  version: number
+  savedAt: string
+  qTable: Array<[string, number[]]>
+  hyperParams: {
+    learningRate: number
+    discountFactor: number
+    epsilon: number
+  }
+}
 
 // Small box speed (for display)
 const smallBoxSpeed = ref(0)
@@ -168,49 +202,55 @@ Composite.add(engine.world, ground)
 
 useEventListener(window, 'keydown', (event) => {
   if (event.code === 'KeyS') {
-    largeBoxVelocity.value.y += 1
+    largeBoxAcceleration.value.y = Math.min(MAX_ACCELERATION.y, largeBoxAcceleration.value.y + 0.5)
   }
   if (event.code === 'KeyW') {
-    largeBoxVelocity.value.y -= 1
+    largeBoxAcceleration.value.y = Math.max(-MAX_ACCELERATION.y, largeBoxAcceleration.value.y - 0.5)
   }
   if (event.code === 'KeyA') {
-    largeBoxVelocity.value.x -= 1
+    largeBoxAcceleration.value.x = Math.max(-MAX_ACCELERATION.x, largeBoxAcceleration.value.x - 0.5)
   }
   if (event.code === 'KeyD') {
-    largeBoxVelocity.value.x += 1
+    largeBoxAcceleration.value.x = Math.min(MAX_ACCELERATION.x, largeBoxAcceleration.value.x + 0.5)
   }
   if (event.code === 'KeyQ') {
-    largeBoxVelocity.value.angle -= 1
+    largeBoxAcceleration.value.angle = Math.max(-MAX_ACCELERATION.angle, largeBoxAcceleration.value.angle - 5)
   }
   if (event.code === 'KeyE') {
-    largeBoxVelocity.value.angle += 1
+    largeBoxAcceleration.value.angle = Math.min(MAX_ACCELERATION.angle, largeBoxAcceleration.value.angle + 5)
   }
 })
 
 // State space definition
 const stateSpace = {
-  low: [0, 0, 0],
-  high: [720, 720, 1],
-  shape: [3],
+  low: [0, 0, 0, -MAX_VELOCITY.x, -MAX_VELOCITY.y, -MAX_VELOCITY.angle, 0],
+  high: [720, 720, 360, MAX_VELOCITY.x, MAX_VELOCITY.y, MAX_VELOCITY.angle, 1],
+  shape: [7],
 }
 
 // Discretize state (for Q-learning)
 function discretizeState(state: number[]): string {
-  const bins = [20, 20, 2] // Number of discretization bins for each dimension
+  const bins = [20, 20, 12, 10, 10, 12, 2] // Number of discretization bins for each dimension
   const discretized = state.map((value, i) => {
     const min = stateSpace.low[i]
     const max = stateSpace.high[i]
     const binSize = (max - min) / bins[i]
-    return Math.min(bins[i] - 1, Math.floor((value - min) / binSize))
+    const clamped = Math.max(min, Math.min(max, value))
+    return Math.min(bins[i] - 1, Math.floor((clamped - min) / binSize))
   })
   return discretized.join(',')
 }
 
 // Get current state
 function getCurrentState(): number[] {
+  const normalizedAngle = ((largeBoxAngle.value * 180 / Math.PI) % 360 + 360) % 360
   return [
     largeBoxCenter.value.x,
     largeBoxCenter.value.y,
+    normalizedAngle,
+    largeBoxVelocity.value.x,
+    largeBoxVelocity.value.y,
+    largeBoxVelocity.value.angle,
     isSmallBoxInsideLargeBox.value ? 1 : 0,
   ]
 }
@@ -234,10 +274,10 @@ function calculateReward(): number {
 
   // Primary goal: small box inside large box
   if (isSmallBoxInsideLargeBox.value) {
-    reward += 10
+    reward += 5
   }
   else {
-    reward -= 1
+    reward -= 10
   }
 
   // Secondary goal: large box inside viewport
@@ -248,8 +288,8 @@ function calculateReward(): number {
     reward -= 5
   }
 
-  // Constraint: small box speed cannot be too small (minimum speed threshold: 0.5)
-  const MIN_SMALL_BOX_SPEED = 0.5
+  // Constraint: small box speed cannot be too small (minimum speed threshold: 2)
+  const MIN_SMALL_BOX_SPEED = 2
   if (smallBoxSpeed < MIN_SMALL_BOX_SPEED) {
     reward -= 2
   }
@@ -269,7 +309,7 @@ function calculateReward(): number {
     largeBoxVelocity.value.x ** 2
     + largeBoxVelocity.value.y ** 2,
   )
-  if (largeBoxSpeed > 3) {
+  if (largeBoxSpeed > 10) {
     reward -= 0.5
   }
 
@@ -282,6 +322,7 @@ function resetEnvironment() {
   largeBoxCenter.value = { ...LARGE_BOX_CENTER_INITIAL }
   largeBoxAngle.value = 0
   largeBoxVelocity.value = { x: 0, y: 0, angle: 0 }
+  largeBoxAcceleration.value = { x: 0, y: 0, angle: 0 }
 
   // Reset small box position (randomized to improve generalization)
   const randomX = 200 + Math.random() * 320
@@ -296,7 +337,7 @@ function resetEnvironment() {
     x: Math.cos(angle) * speed,
     y: Math.sin(angle) * speed,
   })
-  Body.setAngularVelocity(smallBox, (Math.random() - 0.5) * 0.2)
+  Body.setAngularVelocity(smallBox, 0)
 
   currentStep.value = 0
   totalReward.value = 0
@@ -305,11 +346,11 @@ function resetEnvironment() {
 // Select action (ε-greedy strategy)
 function selectAction(state: string): number[] {
   if (Math.random() < epsilon.value) {
-    // Exploration: random action
+    // Exploration: random acceleration
     return [
-      Math.random() * 10 - 5,
-      Math.random() * 10 - 5,
-      Math.random() * 360 - 180,
+      Math.random() * MAX_ACCELERATION.x * 2 - MAX_ACCELERATION.x,
+      Math.random() * MAX_ACCELERATION.y * 2 - MAX_ACCELERATION.y,
+      Math.random() * MAX_ACCELERATION.angle * 2 - MAX_ACCELERATION.angle,
     ]
   }
   else {
@@ -321,24 +362,24 @@ function selectAction(state: string): number[] {
       .filter(i => i !== -1)
     const actionIndex = maxIndices[Math.floor(Math.random() * maxIndices.length)]
 
-    // Convert action index to continuous action
+    // Convert action index to continuous acceleration
     const xIndex = Math.floor(actionIndex / 9) % 3
     const yIndex = Math.floor(actionIndex / 3) % 3
     const angleIndex = actionIndex % 3
 
     return [
-      (xIndex - 1) * 2.5,
-      (yIndex - 1) * 2.5,
-      (angleIndex - 1) * 90,
+      (xIndex - 1) * MAX_ACCELERATION.x,
+      (yIndex - 1) * MAX_ACCELERATION.y,
+      (angleIndex - 1) * MAX_ACCELERATION.angle,
     ]
   }
 }
 
 // Get discrete action index
 function getActionIndex(action: number[]): number {
-  const xIndex = Math.round((action[0] + 5) / 10 * 2)
-  const yIndex = Math.round((action[1] + 5) / 10 * 2)
-  const angleIndex = Math.round((action[2] + 180) / 360 * 2)
+  const xIndex = Math.round((action[0] + MAX_ACCELERATION.x) / (MAX_ACCELERATION.x * 2) * 2)
+  const yIndex = Math.round((action[1] + MAX_ACCELERATION.y) / (MAX_ACCELERATION.y * 2) * 2)
+  const angleIndex = Math.round((action[2] + MAX_ACCELERATION.angle) / (MAX_ACCELERATION.angle * 2) * 2)
   return xIndex * 9 + yIndex * 3 + angleIndex
 }
 
@@ -379,8 +420,8 @@ function trainStep() {
   const stateKey = discretizeState(state)
   const action = selectAction(stateKey)
 
-  // Apply action
-  largeBoxVelocity.value = {
+  // Apply action as acceleration
+  largeBoxAcceleration.value = {
     x: action[0],
     y: action[1],
     angle: action[2],
@@ -408,7 +449,7 @@ function trainStep() {
     const isDone
       = !isLargeBoxInsideViewport.value
         || currentStep.value >= MAX_STEPS_PER_EPISODE
-        || (isSmallBoxInsideLargeBox.value && currentStep.value > 100) // Successfully maintained for a period
+        || (isSmallBoxInsideLargeBox.value && currentStep.value > 500) // Successfully maintained for a period
         || smallBox.position.y > 800 // Small box falls too low
         || isSmallBoxOutsideViewport // Small box flies out of viewport
 
@@ -446,6 +487,7 @@ function stopTraining() {
     trainingIntervalId = null
   }
   largeBoxVelocity.value = { x: 0, y: 0, angle: 0 }
+  largeBoxAcceleration.value = { x: 0, y: 0, angle: 0 }
 }
 
 // Reset training
@@ -456,6 +498,86 @@ function resetTraining() {
   totalReward.value = 0
   episodeRewards.value = []
   qTable.value.clear()
+  resetEnvironment()
+}
+
+function setModelStatus(message: string, level: 'success' | 'error') {
+  modelStatusMessage.value = message
+  modelStatusLevel.value = level
+  if (modelStatusTimeout !== null)
+    window.clearTimeout(modelStatusTimeout)
+  modelStatusTimeout = window.setTimeout(() => {
+    modelStatusMessage.value = ''
+    modelStatusLevel.value = ''
+    modelStatusTimeout = null
+  }, 3000)
+}
+
+function saveModelToFile() {
+  const data: SavedModelFile = {
+    version: MODEL_FILE_VERSION,
+    savedAt: new Date().toISOString(),
+    qTable: Array.from(qTable.value.entries()),
+    hyperParams: {
+      learningRate: learningRate.value,
+      discountFactor: discountFactor.value,
+      epsilon: epsilon.value,
+    },
+  }
+
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `model-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
+  anchor.click()
+  URL.revokeObjectURL(url)
+  setModelStatus('Model saved.', 'success')
+}
+
+function triggerLoadModel() {
+  modelFileInputRef.value?.click()
+}
+
+async function handleModelFileSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file)
+    return
+
+  try {
+    const text = await file.text()
+    const parsed = JSON.parse(text) as SavedModelFile
+    if (!parsed.qTable || !Array.isArray(parsed.qTable))
+      throw new Error('Invalid model file')
+    applyLoadedModel(parsed)
+    setModelStatus('Model loaded successfully.', 'success')
+  }
+  catch (error) {
+    console.error(error)
+    setModelStatus('Failed to load model. Please ensure the file is valid.', 'error')
+  }
+  finally {
+    input.value = ''
+  }
+}
+
+function applyLoadedModel(model: SavedModelFile) {
+  stopTraining()
+  qTable.value = new Map(model.qTable)
+  if (model.hyperParams) {
+    if (typeof model.hyperParams.learningRate === 'number')
+      learningRate.value = model.hyperParams.learningRate
+    if (typeof model.hyperParams.discountFactor === 'number')
+      discountFactor.value = model.hyperParams.discountFactor
+    if (typeof model.hyperParams.epsilon === 'number')
+      epsilon.value = model.hyperParams.epsilon
+  }
+
+  currentEpisode.value = 0
+  currentStep.value = 0
+  totalReward.value = 0
+  episodeRewards.value = []
   resetEnvironment()
 }
 
@@ -475,9 +597,26 @@ watch(simulationSpeed, (newSpeed) => {
 })
 
 const { start, stop } = useTicker((deltaTime) => {
-  largeBoxCenter.value.x += largeBoxVelocity.value.x * deltaTime / 1000
-  largeBoxCenter.value.y += largeBoxVelocity.value.y * deltaTime / 1000
-  largeBoxAngle.value += largeBoxVelocity.value.angle * deltaTime / 1000 * Math.PI / 180
+  const dt = deltaTime / 1000
+
+  // Integrate acceleration into velocity with clamping
+  largeBoxVelocity.value.x = Math.max(
+    -MAX_VELOCITY.x,
+    Math.min(MAX_VELOCITY.x, largeBoxVelocity.value.x + largeBoxAcceleration.value.x * dt),
+  )
+  largeBoxVelocity.value.y = Math.max(
+    -MAX_VELOCITY.y,
+    Math.min(MAX_VELOCITY.y, largeBoxVelocity.value.y + largeBoxAcceleration.value.y * dt),
+  )
+  largeBoxVelocity.value.angle = Math.max(
+    -MAX_VELOCITY.angle,
+    Math.min(MAX_VELOCITY.angle, largeBoxVelocity.value.angle + largeBoxAcceleration.value.angle * dt),
+  )
+
+  // Integrate velocity into position
+  largeBoxCenter.value.x += largeBoxVelocity.value.x * dt
+  largeBoxCenter.value.y += largeBoxVelocity.value.y * dt
+  largeBoxAngle.value += largeBoxVelocity.value.angle * dt * Math.PI / 180
 
   const cos = Math.cos(largeBoxAngle.value)
   const sin = Math.sin(largeBoxAngle.value)
@@ -579,6 +718,13 @@ onUnmounted(() => {
 
 <template>
   <div class="flex items-center justify-center h-screen w-screen">
+    <input
+      ref="modelFileInputRef"
+      type="file"
+      accept="application/json"
+      class="hidden"
+      @change="handleModelFileSelected"
+    >
     <div class="game-container font-[100pxp]">
       <div
         ref="gameContentRef"
@@ -645,6 +791,27 @@ onUnmounted(() => {
                 <span class="text-xs text-gray-500">(Min: 0.5)</span>
               </div>
             </div>
+            <div class="flex gap-2">
+              <button
+                class="btn btn-outline flex-1"
+                @click="saveModelToFile"
+              >
+                Save Model
+              </button>
+              <button
+                class="btn btn-outline flex-1"
+                @click="triggerLoadModel"
+              >
+                Load Model
+              </button>
+            </div>
+            <div
+              v-if="modelStatusMessage"
+              class="text-xs"
+              :class="modelStatusLevel === 'error' ? 'text-red-600' : 'text-green-600'"
+            >
+              {{ modelStatusMessage }}
+            </div>
           </div>
         </div>
         <div class="card">
@@ -695,8 +862,8 @@ onUnmounted(() => {
           <div class="card flex-1 pointer-events-none">
             <FieldRange
               v-model="largeBoxVelocity.x"
-              :min="-5"
-              :max="5"
+              :min="-MAX_VELOCITY.x"
+              :max="MAX_VELOCITY.x"
               :step="0.01"
               label="Large Box X Velocity"
               class="text-black w-full"
@@ -705,8 +872,8 @@ onUnmounted(() => {
           <div class="card flex-1 pointer-events-none">
             <FieldRange
               v-model="largeBoxVelocity.y"
-              :min="-5"
-              :max="5"
+              :min="-MAX_VELOCITY.y"
+              :max="MAX_VELOCITY.y"
               :step="0.01"
               label="Large Box Y Velocity"
               class="text-black w-full"
@@ -715,8 +882,8 @@ onUnmounted(() => {
           <div class="card flex-1 pointer-events-none">
             <FieldRange
               v-model="largeBoxVelocity.angle"
-              :min="-180"
-              :max="180"
+              :min="-MAX_VELOCITY.angle"
+              :max="MAX_VELOCITY.angle"
               :step="0.01"
               label="Large Box Angle Velocity"
               class="text-black w-full"
@@ -858,6 +1025,11 @@ onUnmounted(() => {
   --at-apply: bg-red-500 text-white;
   --at-apply: hover:bg-red-600;
   --at-apply: disabled:hover:bg-red-500;
+}
+
+.btn-outline {
+  --at-apply: border border-gray-400 text-gray-700 bg-white;
+  --at-apply: hover:bg-gray-100;
 }
 
 .game-settings-container {
